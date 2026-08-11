@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         掌阅在线阅读器排版美化
 // @namespace    https://pc.ireader.com/
-// @version      1.6.0
+// @version      1.6.3
 // @description  改善掌阅网页版的字体、字号、行距、段距、颜色、版心与夜间阅读体验。
 // @author       RoyLaw
 // @homepageURL  https://github.com/RoyLaw/ireader-reading-beautifier
@@ -18,6 +18,8 @@
 
   const STORAGE_KEY = 'ireader-reading-beautifier:v1';
   const FRAME_STYLE_ID = 'ireader-reading-beautifier-frame-style';
+  const FRAME_BRIDGE_ID = 'ireader-reading-beautifier-height-bridge';
+  const FRAME_HEIGHT_MESSAGE = 'ireader-reading-beautifier:frame-height';
   const OUTER_STYLE_ID = 'ireader-reading-beautifier-outer-style';
   const UI_HOST_ID = 'ireader-reading-beautifier-ui';
 
@@ -84,6 +86,7 @@
   let applyTimer = 0;
   let observer = null;
   const decodedTextNodes = new Map();
+  const frameHeightTargets = new WeakMap();
 
   function loadState() {
     try {
@@ -281,8 +284,15 @@
       }
 
       body {
+        min-height: 0 !important;
         margin: 0 !important;
         padding: 0 var(--ir-padding) 3em !important;
+        /*
+         * EPUB.js 以 body.scrollHeight 设置 iframe 高度。若首个标题的上边距
+         * 与 body 发生 margin collapse，这段距离不会计入 scrollHeight，
+         * 字号/行距调整后就可能把章节末段压到 iframe 的裁切边界之外。
+         */
+        display: flow-root !important;
       }
 
       body :where(p, li, blockquote, dd, dt, div) {
@@ -427,6 +437,77 @@
     return new RegExp(`<style\\s+id=["']${FRAME_STYLE_ID}["'][^>]*>[\\s\\S]*?<\\/style>`, 'i');
   }
 
+  function frameBridgePattern() {
+    return new RegExp(`<script\\s+id=["']${FRAME_BRIDGE_ID}["'][^>]*>[\\s\\S]*?<\\/script>`, 'i');
+  }
+
+  function frameHeightBridge() {
+    return `<script id="${FRAME_BRIDGE_ID}">
+      (() => {
+        let queued = false;
+        const report = () => {
+          queued = false;
+          const body = document.body;
+          if (!body) return;
+          const height = Math.ceil(body.scrollHeight) + 2;
+          parent.postMessage({ type: '${FRAME_HEIGHT_MESSAGE}', height }, '*');
+        };
+        const schedule = () => {
+          if (queued) return;
+          queued = true;
+          requestAnimationFrame(report);
+        };
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', schedule, { once: true });
+        } else {
+          schedule();
+        }
+        addEventListener('load', schedule, { once: true });
+        document.fonts?.ready.then(schedule).catch(() => {});
+        if ('ResizeObserver' in window) {
+          const resizeObserver = new ResizeObserver(schedule);
+          const observeBody = () => {
+            if (document.body) resizeObserver.observe(document.body);
+            if (document.documentElement) resizeObserver.observe(document.documentElement);
+          };
+          if (document.body) observeBody();
+          else document.addEventListener('DOMContentLoaded', observeBody, { once: true });
+        }
+        setTimeout(schedule, 120);
+        setTimeout(schedule, 600);
+        setTimeout(schedule, 1600);
+      })();
+    <\/script>`;
+  }
+
+  function syncFrameHeight(frame, height) {
+    const pixelHeight = `${height}px`;
+    frameHeightTargets.set(frame, height);
+    if (frame.style.height !== pixelHeight) frame.style.height = pixelHeight;
+    const view = frame.closest('.epub-view');
+    if (view && view.style.height !== pixelHeight) view.style.height = pixelHeight;
+  }
+
+  function enforceFrameHeights() {
+    document.querySelectorAll('iframe[srcdoc]').forEach((frame) => {
+      const height = frameHeightTargets.get(frame);
+      if (height) syncFrameHeight(frame, height);
+    });
+  }
+
+  function handleFrameHeightMessage(event) {
+    const data = event.data;
+    if (!data || data.type !== FRAME_HEIGHT_MESSAGE) return;
+    const height = Math.ceil(Number(data.height));
+    if (!Number.isFinite(height) || height < 100 || height > 5000000) return;
+
+    const frame = [...document.querySelectorAll('iframe[srcdoc]')]
+      .find((candidate) => candidate.contentWindow === event.source);
+    if (!frame || !frame.getAttribute('srcdoc')?.includes(FRAME_BRIDGE_ID)) return;
+
+    syncFrameHeight(frame, height);
+  }
+
   function escapeHtml(value) {
     return String(value)
       .replace(/&/g, '&amp;')
@@ -465,7 +546,9 @@
   }
 
   function patchSource(source) {
-    let cleanSource = String(source || '').replace(frameStylePattern(), '');
+    let cleanSource = String(source || '')
+      .replace(frameStylePattern(), '')
+      .replace(frameBridgePattern(), '');
     if (!cleanSource) return cleanSource;
     let kind = detectDocumentKind(cleanSource);
     // 掌阅的封面资源是短命 blob: URL。任何 srcdoc 改写都会触发 iframe 重载，
@@ -480,22 +563,29 @@
       kind = 'toc';
     }
     const style = `<style id="${FRAME_STYLE_ID}" data-kind="${kind}">${escapeStyleEnd(frameCss(kind))}</style>`;
+    const bridge = frameHeightBridge();
     return /<\/head\s*>/i.test(cleanSource)
-      ? cleanSource.replace(/<\/head\s*>/i, `${style}</head>`)
-      : style + cleanSource;
+      ? cleanSource.replace(/<\/head\s*>/i, `${style}${bridge}</head>`)
+      : style + bridge + cleanSource;
   }
 
   function patchFrame(frame) {
     const source = frame.getAttribute('srcdoc');
     if (!source) return false;
 
-    const cleanSource = source.replace(frameStylePattern(), '');
+    const cleanSource = source
+      .replace(frameStylePattern(), '')
+      .replace(frameBridgePattern(), '');
     const kind = detectDocumentKind(cleanSource);
     // 媒体页只能在 iframe 首次加载前注入；事后重载会令掌阅生成的 blob: 封面地址失效。
-    if (kind === 'media') return false;
+    if (kind === 'media') {
+      frameHeightTargets.delete(frame);
+      return false;
+    }
     const nextSource = patchSource(cleanSource);
 
     if (nextSource === source) return false;
+    frameHeightTargets.delete(frame);
     frame.setAttribute('srcdoc', nextSource);
     return true;
   }
@@ -547,6 +637,7 @@
     createUi();
     decodeObfuscatedText();
     document.querySelectorAll('iframe[srcdoc]').forEach(patchFrame);
+    enforceFrameHeights();
     syncUi();
   }
 
@@ -694,11 +785,12 @@
   }
 
   function start() {
+    window.addEventListener('message', handleFrameHeightMessage);
     ensureOuterStyle();
     createUi();
     applyAll();
     observer = new MutationObserver(scheduleApply);
-    observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['srcdoc'] });
+    observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['srcdoc', 'style'] });
   }
 
   document.addEventListener('keydown', (event) => {
