@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         掌阅在线阅读器排版美化
 // @namespace    https://pc.ireader.com/
-// @version      1.6.3
+// @version      1.6.4
 // @description  改善掌阅网页版的字体、字号、行距、段距、颜色、版心与夜间阅读体验。
 // @author       RoyLaw
 // @homepageURL  https://github.com/RoyLaw/ireader-reading-beautifier
@@ -742,10 +742,19 @@
     root.getElementById('decodeObfuscated').addEventListener('change', (event) => setState({ decodeObfuscated: event.target.checked }));
     root.querySelectorAll('[data-theme]').forEach((button) => button.addEventListener('click', () => applyTheme(button.dataset.theme)));
 
-    ['fontPreset', 'customFont', 'textColor', 'pageColor', 'surroundColor', 'accentColor'].forEach((id) => {
+    ['fontPreset', 'textColor', 'pageColor', 'surroundColor', 'accentColor'].forEach((id) => {
       const input = root.getElementById(id);
-      input.addEventListener(input.type === 'text' ? 'change' : 'input', (event) => setState({ [id]: event.target.value }));
+      input.addEventListener('input', (event) => setState({ [id]: event.target.value }));
     });
+
+    const customFontInput = root.getElementById('customFont');
+    // 页面内容持续变化时，MutationObserver 会调用 syncUi。输入过程中先把草稿写入
+    // state，避免同步旧值覆盖正在键入的文字；失焦后再重排 EPUB，防止每次按键重载。
+    customFontInput.addEventListener('input', (event) => {
+      state = sanitizeState({ ...state, customFont: event.target.value });
+      saveState();
+    });
+    customFontInput.addEventListener('change', applyAll);
 
     ['fontSize', 'lineHeight', 'letterSpacing', 'paragraphSpacing', 'pageWidth', 'pagePadding'].forEach((id) => {
       root.getElementById(id).addEventListener('input', (event) => setState({ [id]: Number(event.target.value) }));
@@ -774,7 +783,8 @@
     root.getElementById('enabled').checked = state.enabled;
     root.getElementById('decodeObfuscated').checked = state.decodeObfuscated;
     root.getElementById('fontPreset').value = state.fontPreset;
-    root.getElementById('customFont').value = state.customFont;
+    const customFontInput = root.getElementById('customFont');
+    if (root.activeElement !== customFontInput) customFontInput.value = state.customFont;
     ['textColor', 'pageColor', 'surroundColor', 'accentColor'].forEach((id) => { root.getElementById(id).value = state[id]; });
     ['fontSize', 'lineHeight', 'letterSpacing', 'paragraphSpacing', 'pageWidth', 'pagePadding'].forEach((id) => {
       root.getElementById(id).value = state[id];
