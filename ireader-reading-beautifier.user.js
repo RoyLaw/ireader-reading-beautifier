@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         掌阅在线阅读器排版美化
 // @namespace    https://pc.ireader.com/
-// @version      1.6.4
+// @version      1.7.0
 // @description  改善掌阅网页版的字体、字号、行距、段距、颜色、版心与夜间阅读体验。
 // @author       RoyLaw
 // @homepageURL  https://github.com/RoyLaw/ireader-reading-beautifier
 // @supportURL   https://github.com/RoyLaw/ireader-reading-beautifier/issues
 // @downloadURL  https://raw.githubusercontent.com/RoyLaw/ireader-reading-beautifier/main/ireader-reading-beautifier.user.js
 // @updateURL    https://raw.githubusercontent.com/RoyLaw/ireader-reading-beautifier/main/ireader-reading-beautifier.user.js
-// @match        https://pc.ireader.com/reader/*
+// @match        https://pc.ireader.com/*
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
@@ -71,6 +71,7 @@
     decodeObfuscated: true,
     fontPreset: 'serif',
     customFont: '',
+    customFonts: [],
     fontSize: 19,
     lineHeight: 1.9,
     letterSpacing: 0.035,
@@ -85,13 +86,17 @@
   let state = loadState();
   let applyTimer = 0;
   let observer = null;
+  let readerActive = false;
+  let routeCheckTimer = 0;
   const decodedTextNodes = new Map();
   const frameHeightTargets = new WeakMap();
 
   function loadState() {
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-      return sanitizeState({ ...DEFAULTS, ...saved });
+      const merged = { ...DEFAULTS, ...saved };
+      if (!Array.isArray(saved.customFonts) && saved.customFont) merged.customFonts = [saved.customFont];
+      return sanitizeState(merged);
     } catch (_) {
       return { ...DEFAULTS };
     }
@@ -110,6 +115,9 @@
       decodeObfuscated: value.decodeObfuscated !== false,
       fontPreset: Object.hasOwn(FONT_OPTIONS, value.fontPreset) ? value.fontPreset : DEFAULTS.fontPreset,
       customFont: String(value.customFont || '').slice(0, 160),
+      customFonts: [...new Set((Array.isArray(value.customFonts) ? value.customFonts : [])
+        .map((name) => String(name || '').replace(/[;{}]/g, '').replace(/["\\]/g, '').trim().slice(0, 160))
+        .filter(Boolean))].slice(0, 30),
       fontSize: clamp(value.fontSize, 14, 30, DEFAULTS.fontSize),
       lineHeight: clamp(value.lineHeight, 1.35, 2.6, DEFAULTS.lineHeight),
       letterSpacing: clamp(value.letterSpacing, 0, 0.15, DEFAULTS.letterSpacing),
@@ -633,6 +641,7 @@
 
   function applyAll() {
     window.clearTimeout(applyTimer);
+    if (!readerActive || !isReaderPage()) return;
     ensureOuterStyle();
     createUi();
     decodeObfuscatedText();
@@ -642,6 +651,7 @@
   }
 
   function scheduleApply() {
+    if (!readerActive) return;
     window.clearTimeout(applyTimer);
     applyTimer = window.setTimeout(applyAll, 60);
   }
@@ -649,7 +659,7 @@
   function setState(patch) {
     state = sanitizeState({ ...state, ...patch });
     saveState();
-    applyAll();
+    if (readerActive) applyAll();
   }
 
   function applyTheme(name) {
@@ -688,9 +698,11 @@
         h2 { margin: 0; font-size: 16px; }
         .enabled { display: flex; gap: 7px; align-items: center; color: #655b52; }
         .themes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
-        .theme, #reset {
+        .theme, #reset, .font-action {
           border: 1px solid #d7cec2; border-radius: 9px; padding: 7px 8px; color: #4b4037; background: #fffdf8; cursor: pointer;
         }
+        .font-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: -3px 0 11px 88px; }
+        .font-action:disabled { opacity: .48; cursor: not-allowed; }
         .theme[aria-pressed="true"] { border-color: #7a5c3e; color: #fff; background: #7a5c3e; }
         label.control { display: grid; grid-template-columns: 88px 1fr 48px; gap: 8px; align-items: center; margin: 11px 0; }
         label.control.wide { grid-template-columns: 88px 1fr; }
@@ -721,6 +733,11 @@
           <option value="sans">中文黑体</option><option value="system">系统界面</option>
         </select></label>
         <label class="control wide"><span>自定义字体</span><input id="customFont" type="text" placeholder="例如：方正屏显雅宋"></label>
+        <label class="control wide"><span>已保存字体</span><select id="savedFonts" aria-label="已保存字体"></select></label>
+        <div class="font-actions">
+          <button id="saveFont" class="font-action" type="button">保存当前</button>
+          <button id="deleteFont" class="font-action" type="button">删除所选</button>
+        </div>
         <label class="decode-option"><input id="decodeObfuscated" type="checkbox">解码混淆字形</label>
         <small class="decode-note">将掌阅私用区字形还原为正常汉字</small>
         ${rangeControl('fontSize', '字号', 14, 30, 0.5)}
@@ -755,13 +772,38 @@
       saveState();
     });
     customFontInput.addEventListener('change', applyAll);
+    customFontInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        saveCurrentFont();
+      }
+    });
+
+    const savedFontsSelect = root.getElementById('savedFonts');
+    savedFontsSelect.addEventListener('change', (event) => {
+      if (event.target.value) setState({ customFont: event.target.value });
+    });
+    root.getElementById('saveFont').addEventListener('click', saveCurrentFont);
+    root.getElementById('deleteFont').addEventListener('click', () => {
+      const selected = savedFontsSelect.value;
+      if (!selected) return;
+      const customFonts = state.customFonts.filter((name) => name !== selected);
+      setState({ customFonts, customFont: state.customFont === selected ? '' : state.customFont });
+    });
+
+    function saveCurrentFont() {
+      const name = customFontInput.value.replace(/[;{}]/g, '').replace(/["\\]/g, '').trim().slice(0, 160);
+      if (!name) return;
+      setState({ customFont: name, customFonts: [...state.customFonts, name] });
+      customFontInput.blur();
+    }
 
     ['fontSize', 'lineHeight', 'letterSpacing', 'paragraphSpacing', 'pageWidth', 'pagePadding'].forEach((id) => {
       root.getElementById(id).addEventListener('input', (event) => setState({ [id]: Number(event.target.value) }));
     });
 
     root.getElementById('reset').addEventListener('click', () => {
-      state = { ...DEFAULTS, panelOpen: true };
+      state = { ...DEFAULTS, customFonts: state.customFonts, panelOpen: true };
       saveState();
       applyAll();
     });
@@ -776,6 +818,16 @@
     return `<label class="color"><span>${label}</span><input id="${id}" type="color"></label>`;
   }
 
+  function syncSavedFonts(root) {
+    const select = root.getElementById('savedFonts');
+    const selected = state.customFonts.includes(state.customFont) ? state.customFont : '';
+    const options = `<option value="">选择已保存字体</option>${state.customFonts
+      .map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('')}`;
+    if (select.innerHTML !== options) select.innerHTML = options;
+    select.value = selected;
+    root.getElementById('deleteFont').disabled = !selected;
+  }
+
   function syncUi() {
     const root = document.getElementById(UI_HOST_ID)?.shadowRoot;
     if (!root) return;
@@ -785,6 +837,7 @@
     root.getElementById('fontPreset').value = state.fontPreset;
     const customFontInput = root.getElementById('customFont');
     if (root.activeElement !== customFontInput) customFontInput.value = state.customFont;
+    syncSavedFonts(root);
     ['textColor', 'pageColor', 'surroundColor', 'accentColor'].forEach((id) => { root.getElementById(id).value = state[id]; });
     ['fontSize', 'lineHeight', 'letterSpacing', 'paragraphSpacing', 'pageWidth', 'pagePadding'].forEach((id) => {
       root.getElementById(id).value = state[id];
@@ -794,22 +847,68 @@
     root.querySelectorAll('[data-theme]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.theme === state.theme)));
   }
 
+  function isReaderPage() {
+    return /^\/reader(?:\/|$)/.test(location.pathname);
+  }
+
+  function activateReader() {
+    if (!document.documentElement) return;
+    if (!readerActive) {
+      readerActive = true;
+      observer ||= new MutationObserver(scheduleApply);
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ['srcdoc', 'style'],
+      });
+    }
+    scheduleApply();
+  }
+
+  function deactivateReader() {
+    if (!readerActive) return;
+    readerActive = false;
+    window.clearTimeout(applyTimer);
+    observer?.disconnect();
+    restoreDecodedText();
+    document.getElementById(OUTER_STYLE_ID)?.remove();
+    document.getElementById(UI_HOST_ID)?.remove();
+  }
+
+  function syncRoute() {
+    if (isReaderPage()) activateReader();
+    else deactivateReader();
+  }
+
+  function installRouteWatch() {
+    for (const method of ['pushState', 'replaceState']) {
+      const original = history[method];
+      history[method] = function (...args) {
+        const result = original.apply(this, args);
+        queueMicrotask(syncRoute);
+        return result;
+      };
+    }
+    window.addEventListener('popstate', syncRoute);
+    window.addEventListener('hashchange', syncRoute);
+    routeCheckTimer = window.setInterval(syncRoute, 500);
+  }
+
   function start() {
     window.addEventListener('message', handleFrameHeightMessage);
-    ensureOuterStyle();
-    createUi();
-    applyAll();
-    observer = new MutationObserver(scheduleApply);
-    observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['srcdoc', 'style'] });
+    syncRoute();
   }
 
   document.addEventListener('keydown', (event) => {
-    if (event.altKey && event.key.toLowerCase() === 'r') {
+    if (readerActive && event.altKey && event.key.toLowerCase() === 'r') {
       event.preventDefault();
       setState({ panelOpen: !state.panelOpen });
     }
   });
 
+  installRouteWatch();
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', start, { once: true });
   } else {
