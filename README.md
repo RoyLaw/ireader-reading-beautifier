@@ -14,6 +14,8 @@
 - **双渲染模式兼容**：同时处理 EPUB 沙箱 iframe 与直接写入主页面的正文。
 - **EPUB 高度同步**：字体和行距重排后自动同步内页真实高度，避免章节末段被固定容器裁切。
 - **动态章节适配**：翻页或切章后自动重新应用设置；按 `Alt + R` 可打开或关闭设置面板。
+- **站内跳转适配**：从书城等掌阅页面进入阅读器时自动启用，无需手动刷新。
+- **常用字体列表**：保存、切换或删除常用的本机字体名称。
 
 ## 安装
 
@@ -21,7 +23,7 @@
 2. 点击 [安装脚本](https://raw.githubusercontent.com/RoyLaw/ireader-reading-beautifier/main/ireader-reading-beautifier.user.js)。
 3. 在 Tampermonkey 页面确认安装，然后打开任意掌阅网页版书籍。
 
-脚本只匹配 `https://pc.ireader.com/reader/*`。右侧的 **Aa** 按钮用于展开设置；快捷键为 `Alt + R`。
+脚本加载于 `https://pc.ireader.com/*`，但只在 `/reader/` 阅读页面启用排版。右侧的 **Aa** 按钮用于展开设置；快捷键为 `Alt + R`。
 
 ## 混淆字形处理
 
